@@ -7,10 +7,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
-#if defined(CONFIG_BT)
-#include "ble.h"
-#endif
-
 #if defined(CONFIG_CLI_SAMPLE_LOW_POWER)
 #include "low_power.h"
 #endif
@@ -69,11 +65,6 @@ int main(void)
 #endif
 
 	LOG_INF(WELLCOME_TEXT);
-
-#if defined(CONFIG_BT)
-	ble_enable();
-#endif
-
 #if defined(CONFIG_CLI_SAMPLE_LOW_POWER)
 	low_power_enable();
 #endif
