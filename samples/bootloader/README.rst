@@ -8,66 +8,75 @@
    :depth: 2
 
 The |NSIB| (NSIB), previously also known as *B0* or ``b0``, is a secure bootloader built and maintained by Nordic Semiconductor.
-It is specifically tailored for the :ref:`immutable bootloader architecture <immutable_bootloader>` of a secure boot chain.
-It can verify and boot a second-stage bootloader or application while providing a persistent and reliable :term:`Root of Trust (RoT)`.
+This version of |NSIP| is modified to allow switchin between two applications using an additional flash page (ota_settings) with bootloader and OTA settings.
+The bootloader is specifically tailored for the :ref:`immutable bootloader architecture <immutable_bootloader>` of a secure boot chain.
+It can verify and boot one of two alternative applications while providing a persistent and reliable *Root of Trust* (RoT).
+The first application is usually the main application. The second application is an OTA image for updating the main application.
+This verion of |NSIB| requires a small modification in <user>\ncs\<version>\nrf\subsys\bootloader: an assert in 'bl_validation\bl_validation.c'
+must be removed to allow application immages of different size.
+
 
 See :ref:`ug_bootloader` for more information about the full bootloader chain.
 
 .. note::
 
-   Currently, the NSIB does not support performing firmware updates over the SMP transport.
-   If the application using the NSIB requires SMP-based firmware updates, such as Bluetooth® LE DFU, :ref:`include MCUboot as a second-stage bootloader <ug_bootloader_adding_upgradable>`.
+   Currently, this immutable bootloader does not support firmware updates over the SMP transport for either an upgradable bootloader or an application.
+   If the application using this bootloader requires SMP-based firmware updates, such as Bluetooth LE DFU, :ref:`include MCUboot as a second-stage bootloader <ug_bootloader_adding_upgradable>`.
 
 .. _bootloader_rot:
-
-Requirements
-************
-
-The NSIB supports the following development kits:
-
-.. table-from-sample-yaml::
-
-The NSIB can only boot images that enable the firmware information module, see the :ref:`doc_fw_info` module.
 
 Overview
 ********
 
-The NSIB implements a simple and reliable :term:`Root of Trust (RoT)` for a secure boot chain:
+The sample accomplishes a simple and reliable *Root of Trust* (RoT) for a secure boot chain as follows:
 
-1. Locks the flash memory.
+1. Locking the flash memory.
 
-   To enable the RoT, it locks the flash memory address range containing itself and its configuration using the hardware available on the given architecture.
+   To enable the RoT, the bootloader sample locks the flash memory that contains both the sample bootloader and its configuration.
+   Locking is done using the hardware that is available on the given architecture.
 
    For additional details on locking, see the :ref:`fprotect_readme` driver.
 
-#. Selects the next slot in the boot chain.
+#. Selecting the application in the boot chain.
 
-   The next stage in the boot chain can either be an application or another bootloader:
+   The next stage in the boot chain can be one of two applications, e.g. a main application and an OTA image.
+   The member mNextBootImage of the structure daOtaSettingsPage stored in the flash page 'ota_settings' determines which application shall be booted next.
+   If mNextBootImage == 0 the main application in S0 will be booted. If mNextBootImage == 1 the secondary application (e.g. OTA) in S1 will be booted.
+   If mNextBootImage == 2 the image with the higher version numner will be booted, like in regular NSIB.
+   If one of the images in invlaid (e.g. not signed) or has no fw_info, the other image will be booted. This allows recovering from a reset during OTA process.
 
-   * When the next stage is an application, you can allocate one or two slots for it.
-   * When the next stage is a second-stage bootloader, two slots are always used.
 
-   Each slot has a version number, and the bootloader will select the slot with the latest version.
+#. Verify the next stage in the boot chain.
 
-   For more information about creating a second stage bootloader, see :ref:`ug_bootloader_adding_upgradable`.
+   After selecting the image to boot next, the bootloader sample verifies the image validity using one of the provisioned public key hashes.
 
-#. Verifies the next stage in the boot chain.
+   The image for the next boot stage has a set of metadata associated with it.
+   This metadata contains the full public key corresponding to the private key used to sign the firmware.
+   The bootloader sample checks the public key against a set of provisioned keys.
 
-   The next image has metadata containing the full public key that corresponds to the private key used to sign the firmware.
-   This public key is checked against the provisioned hashes of public keys to determine if the image is valid.
+   .. note::
+
+      To save space, only the hashes of the provisioned keys are stored and only the hashes of the keys are compared.
+      See :ref:`bootloader_provisioning` for more details.
+
+   If the public key in the metadata matches one of the valid provisioned public key hashes, the image is considered valid.
 
    All public key hashes at lower indices than the matching hash are permanently invalidated at this point.
+   This means that images can no longer be validated with those public keys.
+   For example, if an image is successfully validated with the public key at index 2, public keys 0 and 1 are invalidated.
    You can use this mechanism to decommission broken keys.
 
-#. Boots the next stage in the boot chain.
+   If the public key does not match any remaining valid provisioned hashes, the validation process fails.
 
-   All peripherals that have been used are reset and the next stage is booted.
+#. Booting the next stage in the boot chain.
 
-#. Shares the cryptographic library.
+   After verifying the next boot stage, the bootloader sample uninitializes all peripherals that it used and boots the next boot stage.
 
-   The NSIB shares some of its functionality through an external API (``EXT_API``).
+#. Sharing the cryptographic library through an external API.
 
-   For more information on the process, see :ref:`doc_bl_crypto`.
+   The bootloader sample shares some of its functionality through an external API (``EXT_API``).
+
+   For more information on the process, see the :file:`bl_crypto.h` file.
    For more information on ``EXT_API``, see :ref:`doc_fw_info_ext_api`.
 
 .. _bootloader_provisioning:
@@ -75,68 +84,57 @@ The NSIB implements a simple and reliable :term:`Root of Trust (RoT)` for a secu
 Provisioning
 ============
 
-The public key hashes are not compiled with the source code of the NSIB.
-Instead, they must be written to the device in a process called *provisioning*.
+The public key hashes are not compiled with the source code of the bootloader sample.
+Instead, they must be stored in a separate memory region through a process called *provisioning*.
 
-The hashes are automatically generated by the build system based on the specified private key and the additional public keys.
+By default, the bootloader sample automatically generates and provisions public key hashes directly into the bootloader HEX file, based on the specified private key and the additional public keys.
 
-By default, the hashes are placed directly into the NSIB HEX file and then automatically provisioned when the HEX file is programmed to the device.
+Alternatively, to facilitate the manufacturing process of a device using the bootloader sample, it is possible to decouple this process and program the sample HEX file and the HEX file containing the public key hashes separately.
+If you choose to do so, use the Python scripts located in the :file:`scripts/bootloader` folder to create and provision the keys manually.
 
-However, in a more realistic manufacturing process, you can program the NSIB HEX file and the HEX file containing the hashes separately, using the Python scripts located in the :file:`scripts/bootloader` folder.
-
-In either case, the NSIB accesses the provisioned data at run time using the :ref:`doc_bl_storage` library.
+In both cases, the bootloader access the provisioned data using the :ref:`doc_bl_storage` library.
 
 .. _bootloader_provisioning_otp:
 
-OTP regions
+OTP Regions
 -----------
 
-The one-time programmable (OTP) region is a special region of the *User Information Configuration Registers* (UICR) that only allows flash memory writes in half-word lengths, and *only* when the target half-word has the value of ``0xFFFF``.
-
-On the SoCs that support an OTP region, such as the nRF9160 and nRF5340, the provisioned data is held in the OTP region instead of the internal flash memory.
+On some SoCs/SiPs, such as the nRF9160 or nRF5340, the provisioned data is held in the *one-time programmable* (OTP) region in the *User Information Configuration Registers* (UICR).
+OTP regions are special regions of the flash memory that only allow flash memory writes in half-word lengths, and *only* when the target half-word is the value ``0xFFFF``.
 
 Because of these design constraints, the following limitations apply:
 
-* The public key hash must not contain half-words with the value ``0xFFFF``, as such hashes cannot be guaranteed to be immutable when placed in the OTP region.
-  If any such hashes are provisioned, the NSIB will refuse to boot.
-  If your public key hash is found to contain this value, :ref:`it must be regenerated<ug_fw_update_keys>`.
+1. The public key hash cannot contain half-words with the value ``0xFFFF``, as such hashes cannot be guaranteed to be immutable when placed in the OTP region.
+   Therefore, the bootloader refuses to boot if any hash contains a half-word with the value ``0xFFFF``.
+   If your public key hash is found to contain this value, please :ref:`regenerate it <ug_fw_update_keys>` or use another public key.
 
-* Provisioned data cannot be written more than once to the target device.
-  When programming images that contain flash memory content in the UICR region, such as the NSIB image, the UICR must first be erased.
+#. Writing data to an OTP region means that provisioned data cannot be written more than once to the target device.
+   When programming images that contain flash memory content for this region, such as the bootloader or images containing the bootloader, the UICR must first be erased.
 
 .. note::
    On the nRF9160 and nRF5340, the UICR can only be erased by erasing the entire flash memory.
 
-To erase the entire flash memory, do the following:
+To perform a full erase, do the following:
 
 .. tabs::
 
    .. tab:: Command Line
 
-      Using west:
+      Using ``west``:
 
       .. code-block:: console
 
-         west flash --erase
+        west flash -d *build_directory* --erase
 
-      Using nrfjprog:
+      Using ``nrfjprog``:
 
       .. code-block:: console
 
          nrfjprog -f NRF91 --eraseall
 
-   .. tab:: |VSC|
+   .. tab:: |SES|
 
-      Using the :guilabel:`Actions View` in |nRFVSC|:
-
-         1. Go to the :guilabel:`Actions View`.
-         #. Move the cursor over the :guilabel:`Flash` action.
-         #. Click :guilabel:`Erase And Flash To Board` on the right side of the :guilabel:`Flash` action.
-
-      Using the |VSC| Command Palette:
-
-         1. Open the |VSC| Command Palette.
-         #. Type ``Erase and Flash to Board`` and select the highlighted option.
+      Choose :guilabel:`Target` -> :guilabel:`Connect J-Link` and then :guilabel:`Target` -> :guilabel:`Erase All`.
 
 .. _bootloader_flash_layout:
 
@@ -145,10 +143,11 @@ Flash memory layout
 
 The flash memory layout is defined by the :file:`samples/bootloader/pm.yml` file, which establishes four main partitions:
 
-* *B0* - The NSIB image.
-* *Provision* - The provisioned data.
-* *S0* - Slot 0.
-* *S1* - Slot 1.
+1. *B0* - Contains the bootloader sample.
+#. *Provision* - Stores the provisioned data.
+#. *S0* - Defines one of the two potential storage areas for the second stage bootloader.
+#. *S1* - Defines the other one of the two potential storage areas for the second stage bootloader.
+#. *ota_settings* - settings page for selecting the application to be loaded. It may also contain additional information for the OTA image.
 
 The default location for placing the next image in the boot chain is *S0*.
 This would result, for example, in a flash memory layout like the following, when using the ``nrf52840dk_nrf52840`` board:
@@ -156,22 +155,18 @@ This would result, for example, in a flash memory layout like the following, whe
 .. figure:: ../../doc/nrf/images/b0_flash_layout.svg
    :alt: B0 flash memory layout
 
-   B0 flash memory layout
-
-.. note::
-   When the *Provision* area is in the OTP region, it will not appear in the flash memory layout.
-   See :ref:`bootloader_provisioning_otp` for more information.
+   B0 flash memory layout (without the additional 'ota_settings' partition)
 
 .. _bootloader_pre_signed_variants:
 
 Pre-signed variants
 -------------------
 
-When two slots are present, two images must be built.
-One that is executable from slot 0, and the other one from slot 1.
-Building the image for slot 1 is done by enabling the :kconfig:option:`CONFIG_BUILD_S1_VARIANT` option.
+When the application uses a second-stage upgradable bootloader, *S1* can be programmed with the same image as *S0* when compiled with the :option:`CONFIG_BUILD_S1_VARIANT` option.
+This ensures that the upgradable bootloader can be executed from either slot chosen by the |NSIB|.
 
-When the image for the next stage in the boot chain is upgraded, the new image is written to the slot with the oldest image version.
+When the upgradable bootloader is upgraded, the new image is placed into the slot not in use by the current version of the bootloader.
+At boot, the |NSIB| checks the version information for the images in *S0* and *S1* and boots the one with the highest version.
 See :ref:`bootloader_monotonic_counter` for more information about versioning.
 
 If this image is faulty and cannot be booted, the other partition will always hold a working image that is booted instead.
@@ -183,52 +178,57 @@ When using the ``nrf52840dk_nrf52840`` board, this would produce a flash memory 
 
    B0 flash memory layout with MCUboot
 
+.. note::
+
+   In devices that store provisioning data in an OTP region, the *Provision* area does not appear in the flash memory layout.
+   See :ref:`bootloader_provisioning_otp` for more information.
+
 .. _bootloader_signature_keys:
 
-Signature keys
+Signature Keys
 ==============
 
-The ECDSA-p256 key type is supported for validating the next image in the boot chain.
+This bootloader supports the following key types for validating the next image in the boot chain:
+
+* ECDSA-p256
 
 By default, when not explicitly defined, a private/public key pair is generated during the build.
 However, these key pairs should only be used during development.
 See :ref:`ug_fw_update_development_keys` for more details.
 
-For details on creating and using custom signature keys, refer to the :ref:`ug_bootloader_adding_immutable_keys` documentation.
+For details on creating and using custom signature keys with this sample, refer to the :ref:`ug_bootloader_adding_immutable_keys` documentation.
 
 .. _bootloader_monotonic_counter:
 
-Monotonic counter
+Monotonic Counter
 =================
 
 .. bootloader_monotonic_counter_start
 
-A non-volatile *monotonic counter* can be stored in the *Provision* area and is used to implement anti-rollback protection.
+Firmware versions using the |NSIB| are kept in the form of a *monotonic counter*, a hardware-based version that prevents booting an image with a lower counter value.
+Counter values are kept as slots in the flash memory, with each new counter value occupying a new slot.
+See :option:`CONFIG_SB_MONOTONIC_COUNTER` for more details.
+In this modified version of |NSIB| the downgrand protection is deactivated. The OTA software must take case the only newer applications can be loaded for both images.
 
-Counter updates are written to slots in the *Provision* area, with each new counter update occupying a new slot.
-For this reason, the number of counter updates, and therefore firmware version updates, is limited.
+An application's counter value can be set by building using the :option:`CONFIG_FW_INFO_FIRMWARE_VERSION` option:
 
-Using a counter is optional and can be configured for the application using configuration options.
-You can also configure the supported number of updates, but the number is limited by the size of the *Provision* area and how much of that area is taken up by other features, like public key hashes.
-In addition, you can configure what firmware version of the image you want to boot.
+.. code-block::
 
-For NSIB, the configuration options are :kconfig:option:`CONFIG_SB_MONOTONIC_COUNTER`, :kconfig:option:`CONFIG_SB_NUM_VER_COUNTER_SLOTS`, and :kconfig:option:`CONFIG_FW_INFO_FIRMWARE_VERSION`.
+   CONFIG_FW_INFO_FIRMWARE_VERSION=<integer>
 
-For MCUboot, the configuration options are :kconfig:option:`CONFIG_MCUBOOT_HARDWARE_DOWNGRADE_PREVENTION`, :kconfig:option:`CONFIG_MCUBOOT_HW_DOWNGRADE_PREVENTION_COUNTER_SLOTS`, and :kconfig:option:`CONFIG_MCUBOOT_HW_DOWNGRADE_PREVENTION_COUNTER_VALUE`.
-
-To set options for child images, such as NSIB and MCUboot, see the :ref:`ug_multi_image_variables` section.
+The number of slots available for counter values depends on the type of nRF devices being used.
+For default values and ranges, see :option:`CONFIG_SB_NUM_VER_COUNTER_SLOTS`.
 
 .. bootloader_monotonic_counter_end
 
-Configuration
-*************
+Requirements
+************
 
-|config|
+The sample supports the following development kits:
 
-FEM support
-===========
-
-.. include:: /includes/sample_fem_support.txt
+.. table-from-rows:: /includes/sample_board_rows.txt
+   :header: heading
+   :rows: nrf9160dk_nrf9160ns, nrf5340dk_nrf5340_cpuapp_and_cpuappns, nrf52840dk_nrf52840, nrf52dk_nrf52832
 
 .. _bootloader_build_and_run:
 
@@ -239,52 +239,49 @@ Building and running
 
 .. include:: /includes/build_and_run.txt
 
-.. caution::
-   The NSIB should be included as a child image in a multi-image build, rather than being built stand-alone.
-   While it is technically possible to build the NSIB by itself and merge it into other application images, this process is not supported.
-   To reduce the development time and potential issues with this route, let the existing |NCS| infrastructure for multi-image builds handle the integration.
+The bootloader sample should be included as a child image in a multi-image build, rather than being built stand-alone.
+While it is possible to build this sample by itself and merge it into other application images, this process is not officially supported by the |NCS|.
+To reduce development time and potential issues with this route, you should let the existing |NCS| infrastructure for multi-image builds handle the integration.
 
-For building and running the NSIB with an application, see :ref:`ug_bootloader_adding_immutable`.
+For building and running this sample with an application, see :ref:`ug_bootloader_adding_immutable`.
 
-Building and running using |VSC|
+Building and running using |SES|
 ================================
 
 .. include:: /includes/build_and_run_bootloader.txt
 
-To add the NSIB as a child image to your application, complete the following steps:
+To add the bootloader sample as a child image to your application:
 
 1. :ref:`Create a private key in PEM format <ug_fw_update_keys>`.
-#. Enable the |NSIB| through Kconfig as follows:
+#. Enable the |NSIB| by running ``menuconfig`` on your application:
 
-   a. Select :guilabel:`Kconfig` in the :guilabel:`Actions View` to open the nRF Kconfig tab.
-   #. Expand :guilabel:`Modules` > :guilabel:`nrf` > :guilabel:`Nordic nRF Connect` > :guilabel:`Bootloader` and set :guilabel:`Use Secure Bootloader` to enable :kconfig:option:`CONFIG_SECURE_BOOT`.
-   #. Expand :guilabel:`Use Secure Bootloader`.
-      Under :guilabel:`Private key PEM file` (:kconfig:option:`CONFIG_SB_SIGNING_KEY_FILE`), enter the path to the private key that you created.
+   a. Select :guilabel:`Project` > :guilabel:`Configure nRF Connect SDK project`.
+   #. Go to :guilabel:`Modules` > :guilabel:`Nordic nRF Connect` > :guilabel:`Bootloader` and set :guilabel:`Use Secure Bootloader` to enable :option:`CONFIG_SECURE_BOOT`.
+   #. Under :guilabel:`Private key PEM file` (:option:`CONFIG_SB_SIGNING_KEY_FILE`), enter the path to the private key that you created.
+      If you choose to run the sample with default debug keys, you can skip this step.
 
-      You can also modify other additional configuration options, but that is not recommended.
+      There are additional configuration options that you can modify, but it is not recommended to do so.
       The default settings are suitable for most use cases.
 
       .. note::
-         If you need more flexibility with signing, or if you do not want the build system to handle your private key, choose :kconfig:option:`CONFIG_SB_SIGNING_CUSTOM`, and also specify :kconfig:option:`CONFIG_SB_SIGNING_COMMAND` and :kconfig:option:`CONFIG_SB_SIGNING_PUBLIC_KEY`.
-         You can use the :guilabel:`Search modules` bar in nRF Kconfig to find these options.
+         If you need more flexibility with signing, or if you do not want the build system to handle your private key, choose :option:`CONFIG_SB_SIGNING_CUSTOM`, and also specify :option:`CONFIG_SB_SIGNING_COMMAND` and :option:`CONFIG_SB_SIGNING_PUBLIC_KEY`.
          These options allow you to define the signing command.
 
-   #. Click :guilabel:`Save`.
+   #. Click :guilabel:`Configure`.
 
-#. Select :guilabel:`Build` in the :guilabel:`Actions View` to start the build process.
-   The build process creates two images, one for the NSIB and one for the application, and merges them.
-
-#. Select :guilabel:`Flash` in the :guilabel:`Actions View` to program the resulting image to your device.
+#. Select :guilabel:`Build` -> :guilabel:`Build Solution` to compile your application.
+   The build process creates two images, one for the bootloader and one for the application, and merges them.
+#. Select :guilabel:`Build` -> :guilabel:`Build and Run` to program the resulting image to your device.
 
 Testing
 =======
 
-See :ref:`ug_bootloader_testing` for testing of the expected runtime behavior of the NSIB when built with an application.
+See :ref:`ug_bootloader_testing` for testing the expected runtime behavior of this bootloader when built with an application.
 
 Dependencies
 ************
 
-The following |NCS| libraries are used:
+This sample uses the following |NCS| libraries:
 
 * :ref:`partition_manager`
 * :ref:`doc_fw_info`
@@ -293,7 +290,7 @@ The following |NCS| libraries are used:
 * :ref:`doc_bl_validation`
 * :ref:`doc_bl_storage`
 
-It uses the following `sdk-nrfxlib`_ libraries:
+This sample uses the following `sdk-nrfxlib`_ libraries:
 
 * :ref:`nrfxlib:nrf_cc310_bl_readme`
 * :ref:`nrfxlib:nrf_oberon_readme`
